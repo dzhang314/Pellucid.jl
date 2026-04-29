@@ -406,6 +406,55 @@ function causal_attention_decode!(
 end
 
 
+####################################################################### SAMPLING
+
+
+export sample_logits
+
+
+function sample_logits(
+    logits::AbstractVector{BFloat16},
+    temperature::Real;
+    top_k::Union{Nothing,Integer}=nothing,
+    top_p::Union{Nothing,Real}=nothing,
+)
+    @assert !isempty(logits)
+    @assert isnothing(top_k) || (top_k > 0)
+    @assert isnothing(top_p) || (top_p > 0)
+    k = isnothing(top_k) ? length(logits) : min(Int(top_k), length(logits))
+
+    @inbounds begin
+        probabilities = similar(logits, Float32)
+        probabilities .= Float32.(logits) ./ Float32(temperature)
+        softmax!(probabilities)
+
+        top_indices = partialsortperm(probabilities, 1:k, rev=true)
+        top_probabilities = probabilities[top_indices]
+        top_probabilities ./= sum(top_probabilities)
+
+        total_probability = zero(Float32)
+        n = k
+        for i = 1:k
+            total_probability += top_probabilities[i]
+            if (!isnothing(top_p)) && (total_probability >= top_p)
+                n = i
+                break
+            end
+        end
+
+        acc = zero(Float32)
+        u = rand(Float32) * total_probability
+        for i = 1:n
+            acc += top_probabilities[i]
+            if acc > u
+                return top_indices[i]
+            end
+        end
+        return top_indices[n]
+    end
+end
+
+
 ################################################################################
 
 end # module Pellucid

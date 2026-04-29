@@ -2,13 +2,82 @@ module Pellucid
 
 using Unicode: normalize
 
+################################################################### ADDED TOKENS
+
+
+export AddedToken, Pretoken, split_added_tokens
+
+
+struct AddedToken
+    id::Int
+    content::String
+    special::Bool
+end
+
+
+function AddedToken(token_json)
+    @assert token_json.id isa Integer
+    @assert token_json.content isa AbstractString
+    @assert token_json.single_word === false
+    @assert token_json.lstrip === false
+    @assert token_json.rstrip === false
+    @assert token_json.normalized === false
+    @assert token_json.special isa Bool
+    return AddedToken(
+        Int(token_json.id),
+        String(token_json.content),
+        token_json.special)
+end
+
+
+const Pretoken = Union{Int,String,SubString{String}}
+
+
+function push_split_added_tokens!(
+    result::AbstractVector{Pretoken},
+    s::Union{String,SubString{String}},
+    added_tokens::AbstractVector{AddedToken}
+)
+    if isempty(s)
+        return result
+    end
+    # TODO: This algorithm is only correct when no added token contains
+    # another, and no prefix of one added token is a suffix of another.
+    for added_token in added_tokens
+        m = findfirst(added_token.content, s)
+        if !isnothing(m)
+            push_split_added_tokens!(result,
+                SubString(s, firstindex(s), prevind(s, first(m))),
+                added_tokens)
+            push!(result, added_token.id)
+            push_split_added_tokens!(result,
+                SubString(s, nextind(s, last(m)), lastindex(s)),
+                added_tokens)
+            return result
+        end
+    end
+    push!(result, s)
+    return result
+end
+
+
+function split_added_tokens(
+    s::AbstractString,
+    added_tokens::AbstractVector{AddedToken},
+)
+    if !(s isa Union{String,SubString{String}})
+        s = String(s)
+    end
+    result = Pretoken[]
+    push_split_added_tokens!(result, s, added_tokens)
+    return result
+end
+
+
 #################################################################### NORMALIZERS
 
 
 export AbstractNormalizer, NFCNormalizer, construct_normalizer
-
-
-const Pretoken = Union{Int,String,SubString{String}}
 
 
 abstract type AbstractNormalizer end

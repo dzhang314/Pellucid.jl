@@ -291,9 +291,11 @@ end
 
 function (tokenizer::Tokenizer)(s::AbstractString)
     pieces = split_added_tokens(s, tokenizer.added_tokens)
-    normalized = mapreduce(tokenizer.normalizer, vcat, pieces)
-    pretokens = mapreduce(tokenizer.pretokenizer, vcat, normalized)
-    return mapreduce(tokenizer.model, vcat, pretokens)
+    normalized = mapreduce(tokenizer.normalizer, vcat, pieces;
+        init=Pretoken[])
+    pretokens = mapreduce(tokenizer.pretokenizer, vcat, normalized;
+        init=Pretoken[])
+    return mapreduce(tokenizer.model, vcat, pretokens; init=Int[])
 end
 
 

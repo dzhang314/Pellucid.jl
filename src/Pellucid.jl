@@ -217,6 +217,95 @@ function softmax!(x::AbstractVector{T}) where {T}
 end
 
 
+############################################################### TOKENIZER MODELS
+
+
+export AbstractTokenizerModel, BPETokenizerModel, construct_tokenizer_model
+
+
+abstract type AbstractTokenizerModel end
+
+
+(::AbstractTokenizerModel)(token_id::Integer) = Int[Int(token_id)]
+
+
+struct BPETokenizerModel <: AbstractTokenizerModel
+    vocabulary::Dict{String,Int}
+    merges::Dict{Tuple{Int,Int},Tuple{Int,Int}}
+end
+
+
+function (model::BPETokenizerModel)(s::AbstractString)
+    result = Int[model.vocabulary[string(c)] for c in s]
+    while true
+        best_merge = ((typemax(Int), 0), 0)
+        for i = 1:length(result)-1
+            key = (result[i], result[i+1])
+            if haskey(model.merges, key)
+                best_merge = min(best_merge, (model.merges[key], i))
+            end
+        end
+        (_, merged), index = best_merge
+        if iszero(index)
+            return result
+        end
+        result[index] = merged
+        deleteat!(result, index + 1)
+    end
+end
+
+
+function construct_tokenizer_model(model_json)
+    if model_json.type == "BPE"
+        @assert isnothing(model_json.dropout) || iszero(model_json.dropout)
+        @assert isnothing(model_json.unk_token)
+        @assert isnothing(model_json.continuing_subword_prefix) ||
+                isempty(model_json.continuing_subword_prefix)
+        @assert isnothing(model_json.end_of_word_suffix) ||
+                isempty(model_json.end_of_word_suffix)
+        @assert model_json.byte_fallback === false
+        @assert model_json.ignore_merges === false
+        vocabulary = Dict{String,Int}(model_json.vocab)
+        merges = Dict{Tuple{Int,Int},Tuple{Int,Int}}()
+        for (i, (v, w)) in enumerate(model_json.merges)
+            merges[(vocabulary[v], vocabulary[w])] = (i, vocabulary[v*w])
+        end
+        return BPETokenizerModel(vocabulary, merges)
+    end
+    error("Unknown tokenizer model type: $(model_json.type)")
+end
+
+
+##################################################################### TOKENIZERS
+
+
+export Tokenizer, construct_tokenizer
+
+struct Tokenizer
+    added_tokens::AbstractVector{AddedToken}
+    normalizer::AbstractNormalizer
+    pretokenizer::AbstractPretokenizer
+    model::AbstractTokenizerModel
+end
+
+
+function (tokenizer::Tokenizer)(s::AbstractString)
+    pieces = split_added_tokens(s, tokenizer.added_tokens)
+    normalized = mapreduce(tokenizer.normalizer, vcat, pieces)
+    pretokens = mapreduce(tokenizer.pretokenizer, vcat, normalized)
+    return mapreduce(tokenizer.model, vcat, pretokens)
+end
+
+
+function construct_tokenizer(tokenizer_json)
+    return Tokenizer(
+        AddedToken.(tokenizer_json.added_tokens),
+        construct_normalizer(tokenizer_json.normalizer),
+        construct_pretokenizer(tokenizer_json.pre_tokenizer),
+        construct_tokenizer_model(tokenizer_json.model))
+end
+
+
 ################################################################################
 
 end # module Pellucid

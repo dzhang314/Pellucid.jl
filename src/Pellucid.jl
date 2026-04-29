@@ -122,6 +122,32 @@ function construct_pretokenizer(pretokenizer_json)
 end
 
 
+#################################################################### ACTIVATIONS
+
+
+export silu, softmax!
+
+
+@inline silu(x::T) where {T} = x / (one(T) + exp(-x))
+
+
+function softmax!(x::AbstractVector{T}) where {T}
+    if !isempty(x)
+        m = maximum(x)
+        s = zero(T)
+        @inbounds begin
+            @simd for i in eachindex(x)
+                y = exp(x[i] - m)
+                x[i] = y
+                s += y
+            end
+        end
+        x .*= inv(s)
+    end
+    return x
+end
+
+
 ################################################################################
 
 end # module Pellucid

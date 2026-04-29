@@ -1,5 +1,6 @@
 module Pellucid
 
+using BFloat16s: BFloat16
 using Unicode: normalize
 
 ################################################################### ADDED TOKENS
@@ -191,32 +192,6 @@ function construct_pretokenizer(pretokenizer_json)
 end
 
 
-#################################################################### ACTIVATIONS
-
-
-export silu, softmax!
-
-
-@inline silu(x::T) where {T} = x / (one(T) + exp(-x))
-
-
-function softmax!(x::AbstractVector{T}) where {T}
-    if !isempty(x)
-        m = maximum(x)
-        s = zero(T)
-        @inbounds begin
-            @simd for i in eachindex(x)
-                y = exp(x[i] - m)
-                x[i] = y
-                s += y
-            end
-        end
-        x .*= inv(s)
-    end
-    return x
-end
-
-
 ############################################################### TOKENIZER MODELS
 
 
@@ -239,11 +214,14 @@ function (model::BPETokenizerModel)(s::AbstractString)
     result = Int[model.vocabulary[string(c)] for c in s]
     while true
         best_merge = ((typemax(Int), 0), 0)
-        for i = 1:length(result)-1
-            key = (result[i], result[i+1])
+        i = firstindex(result)
+        while i < lastindex(result)
+            i_next = nextind(result, i)
+            key = (result[i], result[i_next])
             if haskey(model.merges, key)
                 best_merge = min(best_merge, (model.merges[key], i))
             end
+            i = i_next
         end
         (_, merged), index = best_merge
         if iszero(index)
@@ -305,6 +283,126 @@ function construct_tokenizer(tokenizer_json)
         construct_normalizer(tokenizer_json.normalizer),
         construct_pretokenizer(tokenizer_json.pre_tokenizer),
         construct_tokenizer_model(tokenizer_json.model))
+end
+
+
+########################################################### ACTIVATION FUNCTIONS
+
+
+export silu, softmax!
+
+
+@inline silu(x::T) where {T} = x / (one(T) + exp(-x))
+
+
+function softmax!(x::AbstractVector{T}) where {T}
+    if !isempty(x)
+        m = maximum(x)
+        s = zero(T)
+        @inbounds begin
+            @simd for i in eachindex(x)
+                y = exp(x[i] - m)
+                x[i] = y
+                s += y
+            end
+        end
+        x .*= inv(s)
+    end
+    return x
+end
+
+
+###################################################################### ATTENTION
+
+
+export causal_attention_prefill!, causal_attention_decode!
+
+
+function causal_attention_prefill!(
+    z::AbstractArray{BFloat16,3},
+    q::AbstractArray{BFloat16,3},
+    k::AbstractArray{BFloat16,3},
+    v::AbstractArray{BFloat16,3},
+    scores::AbstractVector{Float32},
+)
+    ax_head = axes(q, 1)
+    ax_q_heads = axes(q, 2)
+    ax_tokens = axes(q, 3)
+    ax_kv_heads = axes(k, 2)
+    @assert axes(z) == (ax_head, ax_q_heads, ax_tokens)
+    @assert axes(q) == (ax_head, ax_q_heads, ax_tokens)
+    @assert axes(k) == (ax_head, ax_kv_heads, ax_tokens)
+    @assert axes(v) == (ax_head, ax_kv_heads, ax_tokens)
+    @assert issubset(ax_tokens, axes(scores, 1))
+    num_q_heads = length(ax_q_heads)
+    num_kv_heads = length(ax_kv_heads)
+    @assert iszero(num_q_heads % num_kv_heads)
+    g = div(num_q_heads, num_kv_heads)
+    inv_sqrt_d_head = sqrt(inv(Float32(length(ax_head))))
+    @inbounds for t in ax_tokens
+        for (n_q, h_q) in enumerate(ax_q_heads)
+            h_kv = ax_kv_heads[div(n_q - 1, g)+1]
+            for s = first(ax_tokens):t
+                acc = zero(Float32)
+                @simd for i in ax_head
+                    acc += Float32(q[i, h_q, t]) * Float32(k[i, h_kv, s])
+                end
+                scores[s] = inv_sqrt_d_head * acc
+            end
+            softmax!(view(scores, first(ax_tokens):t))
+            for i in ax_head
+                acc = zero(Float32)
+                @simd for s = first(ax_tokens):t
+                    acc += scores[s] * Float32(v[i, h_kv, s])
+                end
+                z[i, h_q, t] = BFloat16(acc)
+            end
+        end
+    end
+    return z
+end
+
+
+function causal_attention_decode!(
+    z::AbstractMatrix{BFloat16},
+    q::AbstractMatrix{BFloat16},
+    k::AbstractArray{BFloat16,3},
+    v::AbstractArray{BFloat16,3},
+    scores::AbstractVector{Float32},
+)
+    ax_head = axes(q, 1)
+    ax_q_heads = axes(q, 2)
+    ax_kv_heads = axes(k, 2)
+    ax_tokens = axes(k, 3)
+    @assert axes(z) == (ax_head, ax_q_heads)
+    @assert axes(q) == (ax_head, ax_q_heads)
+    @assert axes(k) == (ax_head, ax_kv_heads, ax_tokens)
+    @assert axes(v) == (ax_head, ax_kv_heads, ax_tokens)
+    @assert issubset(ax_tokens, axes(scores, 1))
+    num_q_heads = length(ax_q_heads)
+    num_kv_heads = length(ax_kv_heads)
+    @assert iszero(num_q_heads % num_kv_heads)
+    g = div(num_q_heads, num_kv_heads)
+    inv_sqrt_d_head = sqrt(inv(Float32(length(ax_head))))
+    @inbounds for (n_q, h_q) in enumerate(ax_q_heads)
+        h_kv = ax_kv_heads[div(n_q - 1, g)+1]
+        for s in ax_tokens
+            acc = zero(Float32)
+            @simd for i in ax_head
+                acc += Float32(q[i, h_q]) * Float32(k[i, h_kv, s])
+            end
+            scores[s] = inv_sqrt_d_head * acc
+        end
+        softmax!(view(scores, ax_tokens))
+        for i in ax_head
+            acc = zero(Float32)
+            @simd for s in ax_tokens
+                acc += scores[s] * Float32(v[i, h_kv, s])
+            end
+            z[i, h_q] = BFloat16(acc)
+        end
+    end
+    return z
 end
 
 

@@ -1,0 +1,7 @@
+name = "Pellucid"
+uuid = "4911ac90-cc6d-4327-a8ad-69792094aa21"
+authors = ["David K. Zhang <dzhang314@gmail.com>"]
+version = "0.1.0"
+
+[deps]
+Unicode = "4ec0a83e-493e-50e2-b9ac-8f72acf5a8f5"

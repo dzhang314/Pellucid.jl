@@ -4,4 +4,5 @@ authors = ["David K. Zhang <dzhang314@gmail.com>"]
 version = "0.1.0"
 
 [deps]
+BFloat16s = "ab4f0b2a-ad5b-11e8-123f-65d77653426b"
 Unicode = "4ec0a83e-493e-50e2-b9ac-8f72acf5a8f5"

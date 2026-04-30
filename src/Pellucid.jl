@@ -89,8 +89,7 @@ abstract type AbstractNormalizer end
 (::AbstractNormalizer)(token_id::Integer) = Pretoken[Int(token_id)]
 
 
-struct NFCNormalizer <: AbstractNormalizer
-end
+struct NFCNormalizer <: AbstractNormalizer end
 
 
 (::NFCNormalizer)(s::AbstractString) = Pretoken[normalize(s, :NFC)]
@@ -145,8 +144,7 @@ function (pretokenizer::SplitPretokenizer)(s::AbstractString)
 end
 
 
-struct ByteLevelPretokenizer <: AbstractPretokenizer
-end
+struct ByteLevelPretokenizer <: AbstractPretokenizer end
 
 
 @inline (::ByteLevelPretokenizer)(b::UInt8) =
@@ -197,7 +195,8 @@ end
 ############################################################### TOKENIZER MODELS
 
 
-export AbstractTokenizerModel, BPETokenizerModel, construct_tokenizer_model
+export AbstractTokenizerModel, vocabulary,
+    BPETokenizerModel, construct_tokenizer_model
 
 
 abstract type AbstractTokenizerModel end
@@ -210,6 +209,9 @@ struct BPETokenizerModel <: AbstractTokenizerModel
     vocabulary::Dict{String,Int}
     merges::Dict{Tuple{Int,Int},Tuple{Int,Int}}
 end
+
+
+@inline vocabulary(model::BPETokenizerModel) = model.vocabulary
 
 
 function (model::BPETokenizerModel)(s::AbstractString)
@@ -257,16 +259,67 @@ function construct_tokenizer_model(model_json)
 end
 
 
+####################################################################### DECODERS
+
+
+export AbstractDecoder, ByteLevelDecoder, construct_decoder
+
+
+abstract type AbstractDecoder end
+
+
+struct ByteLevelDecoder <: AbstractDecoder end
+
+
+@inline function (::ByteLevelDecoder)(c::Char)
+    k = codepoint(c)
+    if (0x21 <= k <= 0x7E) | (0xA1 <= k <= 0xAC) | (0xAE <= k <= 0xFF)
+        return k % UInt8
+    elseif 0x0100 <= k <= 0x0120
+        return (k - 0x0100) % UInt8
+    elseif 0x0121 <= k <= 0x0142
+        return (k - 0x00A2) % UInt8
+    elseif k == 0x0143
+        return (k - 0x0096) % UInt8
+    end
+    return nothing
+end
+
+
+function (decoder::ByteLevelDecoder)(s::AbstractString)
+    result = UInt8[]
+    for c in s
+        b = decoder(c)
+        if isnothing(b)
+            return Vector{UInt8}(s)
+        end
+        push!(result, b)
+    end
+    return result
+end
+
+
+function construct_decoder(decoder_json)
+    if decoder_json["type"] == "ByteLevel"
+        return ByteLevelDecoder()
+    end
+    error("Unknown decoder type: $(decoder_json["type"])")
+end
+
+
 ##################################################################### TOKENIZERS
 
 
 export Tokenizer, construct_tokenizer
+
 
 struct Tokenizer
     added_tokens::AbstractVector{AddedToken}
     normalizer::AbstractNormalizer
     pretokenizer::AbstractPretokenizer
     model::AbstractTokenizerModel
+    decoder::AbstractDecoder
+    token_bytes::Dict{Int,Vector{UInt8}}
 end
 
 
@@ -287,14 +340,18 @@ function construct_tokenizer(tokenizer_json)
     if !isnothing(post_processor_json)
         @assert post_processor_json["type"] == "ByteLevel"
     end
-    decoder_json = tokenizer_json["decoder"]
-    @assert !isnothing(decoder_json)
-    @assert decoder_json["type"] == "ByteLevel"
+    added_tokens = AddedToken.(tokenizer_json["added_tokens"])
+    model = construct_tokenizer_model(tokenizer_json["model"])
+    decoder = construct_decoder(tokenizer_json["decoder"])
     return Tokenizer(
-        AddedToken.(tokenizer_json["added_tokens"]),
+        added_tokens,
         construct_normalizer(tokenizer_json["normalizer"]),
         construct_pretokenizer(tokenizer_json["pre_tokenizer"]),
-        construct_tokenizer_model(tokenizer_json["model"]))
+        model,
+        decoder,
+        merge(
+            Dict(id => decoder(s) for (s, id) in vocabulary(model)),
+            Dict(t.id => decoder(t.content) for t in added_tokens)))
 end
 
 

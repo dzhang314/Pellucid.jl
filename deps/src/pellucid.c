@@ -2,6 +2,47 @@
 #include <omp.h>
 #include <stddef.h>
 
+void pellucid_matvec_bf16(
+    __bf16 *const restrict result,
+    const __bf16 *const restrict matrix,
+    const __bf16 *const restrict vector,
+    const size_t result_size,
+    const size_t vector_size // must be divisible by 128
+) {
+#pragma omp parallel
+    {
+        const size_t num_threads = (size_t)omp_get_num_threads();
+        const size_t thread_id = (size_t)omp_get_thread_num();
+        for (size_t i = (thread_id * result_size) / num_threads;
+             i < ((thread_id + 1) * result_size) / num_threads; ++i) {
+            const __bf16 *const row = matrix + vector_size * i;
+            __m512 c0 = _mm512_setzero_ps();
+            __m512 c1 = _mm512_setzero_ps();
+            __m512 c2 = _mm512_setzero_ps();
+            __m512 c3 = _mm512_setzero_ps();
+            for (size_t j = 0; j < vector_size; j += 0x80) {
+                const __bf16 *const a = row + j;
+                const __bf16 *const b = vector + j;
+                const __m512bh a0 = (__m512bh)_mm512_loadu_ps(a + 0x00);
+                const __m512bh a1 = (__m512bh)_mm512_loadu_ps(a + 0x20);
+                const __m512bh a2 = (__m512bh)_mm512_loadu_ps(a + 0x40);
+                const __m512bh a3 = (__m512bh)_mm512_loadu_ps(a + 0x60);
+                const __m512bh b0 = (__m512bh)_mm512_loadu_ps(b + 0x00);
+                const __m512bh b1 = (__m512bh)_mm512_loadu_ps(b + 0x20);
+                const __m512bh b2 = (__m512bh)_mm512_loadu_ps(b + 0x40);
+                const __m512bh b3 = (__m512bh)_mm512_loadu_ps(b + 0x60);
+                c0 = _mm512_dpbf16_ps(c0, a0, b0);
+                c1 = _mm512_dpbf16_ps(c1, a1, b1);
+                c2 = _mm512_dpbf16_ps(c2, a2, b2);
+                c3 = _mm512_dpbf16_ps(c3, a3, b3);
+            }
+            result[i] = _mm_cvtness_sbh(_mm512_reduce_add_ps(
+                _mm512_add_ps(_mm512_add_ps(c0, c1), _mm512_add_ps(c2, c3))
+            ));
+        }
+    }
+}
+
 static void insert_top_k(
     size_t *const indices,
     float *const values,

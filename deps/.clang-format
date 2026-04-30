@@ -1,0 +1,3 @@
+AlignAfterOpenBracket: BlockIndent
+BinPackParameters: OnePerLine
+IndentWidth: 4

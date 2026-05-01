@@ -517,6 +517,69 @@ function rmsnorm!(
 end
 
 
+###################################################### ROTARY POSITION EMBEDDING
+
+
+export rope_angular_velocities, rope!
+
+
+function rope_angular_velocities(base::T, d_head::Integer) where {T}
+    @assert iseven(d_head)
+    multiplier = -log2(base) / T(d_head)
+    return [exp2(T(2 * i) * multiplier) for i = 0:div(Int(d_head), 2)-1]
+end
+
+
+function rope!(
+    x::AbstractVector{BFloat16},
+    angular_velocities::AbstractVector{Float32},
+    position::Integer,
+)
+    offset = length(angular_velocities)
+    @assert axes(x, 1) == Base.OneTo(2 * offset)
+    @assert axes(angular_velocities, 1) == Base.OneTo(offset)
+    p = Float32(position)
+    @inbounds begin
+        @simd ivdep for i = 1:offset
+            s, c = sincos(p * angular_velocities[i])
+            j = i + offset
+            u = Float32(x[i])
+            v = Float32(x[j])
+            x[i] = BFloat16(c * u - s * v)
+            x[j] = BFloat16(s * u + c * v)
+        end
+    end
+    return x
+end
+
+
+function rope!(
+    x::AbstractMatrix{BFloat16},
+    angular_velocities::AbstractVector{Float32},
+    position::Integer,
+)
+    @inbounds for i in axes(x, 2)
+        rope!(view(x, :, i), angular_velocities, position)
+    end
+    return x
+end
+
+
+function rope!(
+    x::AbstractArray{BFloat16,3},
+    angular_velocities::AbstractVector{Float32},
+    positions::AbstractVector{<:Integer},
+)
+    @assert axes(x, 3) == axes(positions, 1)
+    @inbounds for j in axes(x, 3)
+        for i in axes(x, 2)
+            rope!(view(x, :, i, j), angular_velocities, positions[j])
+        end
+    end
+    return x
+end
+
+
 ########################################################### ACTIVATION FUNCTIONS
 
 

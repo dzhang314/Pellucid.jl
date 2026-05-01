@@ -1,10 +1,17 @@
 {
     "words": [
+        "Cvoid",
         "cvtness",
+        "dlext",
+        "dlopen",
+        "dlsym",
         "dpbf",
+        "Libdl",
         "libpellucid",
         "loadu",
         "logits",
+        "matmul",
+        "matvec",
         "parsefile",
         "pretoken",
         "pretokenizer",
@@ -13,6 +20,7 @@
         "safetensors",
         "silu",
         "softmax",
-        "subword"
+        "subword",
+        "Zhang"
     ]
 }

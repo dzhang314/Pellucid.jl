@@ -1,7 +1,9 @@
 module Pellucid
 
+using Base.Iterators: partition
 using BFloat16s: BFloat16
 using JSON: parsefile
+using Libdl: dlext, dlopen, dlsym
 using SafeTensors: deserialize
 using Unicode: normalize
 
@@ -394,6 +396,73 @@ function load_safetensors_model(model_dir::AbstractString)
 end
 
 
+######################################################### LINEAR ALGEBRA KERNELS
+
+
+export linear!
+
+
+const PELLUCID_LIBRARY = Ref{Ptr{Cvoid}}()
+const PELLUCID_MATVEC_BF16 = Ref{Ptr{Cvoid}}()
+const PELLUCID_MATMUL_BF16 = Ref{Ptr{Cvoid}}()
+
+
+function __init__()
+    PELLUCID_LIBRARY[] = dlopen(joinpath(@__DIR__, "..",
+        "deps", "usr", "lib", "libpellucid.$dlext"))
+    PELLUCID_MATVEC_BF16[] = dlsym(PELLUCID_LIBRARY[], :pellucid_matvec_bf16)
+    PELLUCID_MATMUL_BF16[] = dlsym(PELLUCID_LIBRARY[], :pellucid_matmul_bf16)
+    return nothing
+end
+
+
+function linear!(
+    y::StridedVector{BFloat16},
+    w::StridedMatrix{BFloat16},
+    x::StridedVector{BFloat16},
+)
+    @assert strides(y) == (1,)
+    @assert strides(w) == (1, size(w, 1))
+    @assert strides(x) == (1,)
+    @assert axes(w, 1) == axes(x, 1)
+    @assert axes(w, 2) == axes(y, 1)
+    @assert iszero(size(w, 1) % 128)
+    ccall(PELLUCID_MATVEC_BF16[], Cvoid,
+        (Ptr{BFloat16}, Ptr{BFloat16}, Ptr{BFloat16}, Csize_t, Csize_t),
+        y, w, x, length(y), length(x))
+    return y
+end
+
+
+function linear!(
+    y::StridedMatrix{BFloat16},
+    w::StridedMatrix{BFloat16},
+    x::StridedMatrix{BFloat16},
+)
+    @assert strides(y) == (1, size(y, 1))
+    @assert strides(w) == (1, size(w, 1))
+    @assert strides(x) == (1, size(x, 1))
+    @assert axes(w, 1) == axes(x, 1)
+    @assert axes(w, 2) == axes(y, 1)
+    @assert axes(x, 2) == axes(y, 2)
+    @assert iszero(size(w, 1) % 32)
+    @assert iszero(size(w, 2) % 8)
+    @assert iszero(size(x, 1) % 128) || iseven(size(x, 2))
+    batch_size = size(x, 2)
+    kernel_batch_size = batch_size - (batch_size % 2)
+    if !iszero(kernel_batch_size)
+        ccall(PELLUCID_MATMUL_BF16[], Cvoid,
+            (Ptr{BFloat16}, Ptr{BFloat16}, Ptr{BFloat16},
+                Csize_t, Csize_t, Csize_t),
+            y, w, x, size(y, 1), kernel_batch_size, size(x, 1))
+    end
+    if isodd(batch_size)
+        linear!(view(y, :, last(axes(y, 2))), w, view(x, :, last(axes(x, 2))))
+    end
+    return y
+end
+
+
 ########################################################### ACTIVATION FUNCTIONS
 
 
@@ -426,6 +495,12 @@ end
 export causal_attention_prefill!, causal_attention_decode!
 
 
+@inline grouped_zip(xs, ys) = (
+    (x, y)
+    for (y, group) in zip(ys, partition(xs, div(length(xs), length(ys))))
+    for x in group)
+
+
 function causal_attention_prefill!(
     z::AbstractArray{BFloat16,3},
     q::AbstractArray{BFloat16,3},
@@ -450,10 +525,8 @@ function causal_attention_prefill!(
     num_q_heads = length(ax_q_heads)
     num_kv_heads = length(ax_kv_heads)
     @assert iszero(num_q_heads % num_kv_heads)
-    g = div(num_q_heads, num_kv_heads)
     @inbounds for (t_q, t_kv) in zip(ax_q_tokens, cache_indices)
-        for (n_q, h_q) in enumerate(ax_q_heads)
-            h_kv = ax_kv_heads[div(n_q - 1, g)+1]
+        for (h_q, h_kv) in grouped_zip(ax_q_heads, ax_kv_heads)
             for s = first(ax_kv_tokens):t_kv
                 acc = zero(Float32)
                 @simd for i in ax_head
@@ -495,9 +568,7 @@ function causal_attention_decode!(
     num_q_heads = length(ax_q_heads)
     num_kv_heads = length(ax_kv_heads)
     @assert iszero(num_q_heads % num_kv_heads)
-    g = div(num_q_heads, num_kv_heads)
-    @inbounds for (n_q, h_q) in enumerate(ax_q_heads)
-        h_kv = ax_kv_heads[div(n_q - 1, g)+1]
+    @inbounds for (h_q, h_kv) in grouped_zip(ax_q_heads, ax_kv_heads)
         for s in ax_tokens
             acc = zero(Float32)
             @simd for i in ax_head

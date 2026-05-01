@@ -431,39 +431,43 @@ function causal_attention_prefill!(
     q::AbstractArray{BFloat16,3},
     k::AbstractArray{BFloat16,3},
     v::AbstractArray{BFloat16,3},
-    scores::AbstractVector{Float32},
+    scores::AbstractVector{Float32};
+    scale::Float32=sqrt(inv(Float32(size(q, 1)))),
+    cache_indices::AbstractVector{<:Integer}=axes(q, 3),
 )
     ax_head = axes(q, 1)
     ax_q_heads = axes(q, 2)
-    ax_tokens = axes(q, 3)
+    ax_q_tokens = axes(q, 3)
     ax_kv_heads = axes(k, 2)
-    @assert axes(z) == (ax_head, ax_q_heads, ax_tokens)
-    @assert axes(q) == (ax_head, ax_q_heads, ax_tokens)
-    @assert axes(k) == (ax_head, ax_kv_heads, ax_tokens)
-    @assert axes(v) == (ax_head, ax_kv_heads, ax_tokens)
-    @assert issubset(ax_tokens, axes(scores, 1))
+    ax_kv_tokens = axes(k, 3)
+    @assert axes(z) == (ax_head, ax_q_heads, ax_q_tokens)
+    @assert axes(q) == (ax_head, ax_q_heads, ax_q_tokens)
+    @assert axes(k) == (ax_head, ax_kv_heads, ax_kv_tokens)
+    @assert axes(v) == (ax_head, ax_kv_heads, ax_kv_tokens)
+    @assert issubset(ax_kv_tokens, axes(scores, 1))
+    @assert length(cache_indices) == length(ax_q_tokens)
+    @assert issubset(cache_indices, ax_kv_tokens)
     num_q_heads = length(ax_q_heads)
     num_kv_heads = length(ax_kv_heads)
     @assert iszero(num_q_heads % num_kv_heads)
     g = div(num_q_heads, num_kv_heads)
-    inv_sqrt_d_head = sqrt(inv(Float32(length(ax_head))))
-    @inbounds for t in ax_tokens
+    @inbounds for (t_q, t_kv) in zip(ax_q_tokens, cache_indices)
         for (n_q, h_q) in enumerate(ax_q_heads)
             h_kv = ax_kv_heads[div(n_q - 1, g)+1]
-            for s = first(ax_tokens):t
+            for s = first(ax_kv_tokens):t_kv
                 acc = zero(Float32)
                 @simd for i in ax_head
-                    acc += Float32(q[i, h_q, t]) * Float32(k[i, h_kv, s])
+                    acc += Float32(q[i, h_q, t_q]) * Float32(k[i, h_kv, s])
                 end
-                scores[s] = inv_sqrt_d_head * acc
+                scores[s] = scale * acc
             end
-            softmax!(view(scores, first(ax_tokens):t))
+            softmax!(view(scores, first(ax_kv_tokens):t_kv))
             for i in ax_head
                 acc = zero(Float32)
-                @simd for s = first(ax_tokens):t
+                @simd for s = first(ax_kv_tokens):t_kv
                     acc += scores[s] * Float32(v[i, h_kv, s])
                 end
-                z[i, h_q, t] = BFloat16(acc)
+                z[i, h_q, t_q] = BFloat16(acc)
             end
         end
     end
@@ -476,7 +480,8 @@ function causal_attention_decode!(
     q::AbstractMatrix{BFloat16},
     k::AbstractArray{BFloat16,3},
     v::AbstractArray{BFloat16,3},
-    scores::AbstractVector{Float32},
+    scores::AbstractVector{Float32};
+    scale::Float32=sqrt(inv(Float32(size(q, 1)))),
 )
     ax_head = axes(q, 1)
     ax_q_heads = axes(q, 2)
@@ -491,7 +496,6 @@ function causal_attention_decode!(
     num_kv_heads = length(ax_kv_heads)
     @assert iszero(num_q_heads % num_kv_heads)
     g = div(num_q_heads, num_kv_heads)
-    inv_sqrt_d_head = sqrt(inv(Float32(length(ax_head))))
     @inbounds for (n_q, h_q) in enumerate(ax_q_heads)
         h_kv = ax_kv_heads[div(n_q - 1, g)+1]
         for s in ax_tokens
@@ -499,7 +503,7 @@ function causal_attention_decode!(
             @simd for i in ax_head
                 acc += Float32(q[i, h_q]) * Float32(k[i, h_kv, s])
             end
-            scores[s] = inv_sqrt_d_head * acc
+            scores[s] = scale * acc
         end
         softmax!(view(scores, ax_tokens))
         for i in ax_head

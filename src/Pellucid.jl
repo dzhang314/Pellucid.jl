@@ -463,6 +463,60 @@ function linear!(
 end
 
 
+############################################################ LAYER NORMALIZATION
+
+
+export rmsnorm!
+
+
+function rmsnorm!(
+    x::AbstractVector{BFloat16},
+    w::AbstractVector{BFloat16},
+    epsilon::Float32,
+)
+    @assert axes(x, 1) == axes(w, 1)
+    @inbounds begin
+        acc = zero(Float32)
+        @simd for i in eachindex(x)
+            acc += abs2(Float32(x[i]))
+        end
+        inv_rms = sqrt(inv(acc / Float32(length(x)) + epsilon))
+        @simd ivdep for i in eachindex(x)
+            x[i] = BFloat16(Float32(w[i]) * (inv_rms * Float32(x[i])))
+        end
+    end
+    return x
+end
+
+
+function rmsnorm!(
+    x::AbstractMatrix{BFloat16},
+    w::AbstractVector{BFloat16},
+    epsilon::Float32,
+)
+    @assert axes(x, 1) == axes(w, 1)
+    for i in axes(x, 2)
+        rmsnorm!(view(x, :, i), w, epsilon)
+    end
+    return x
+end
+
+
+function rmsnorm!(
+    x::AbstractArray{BFloat16,3},
+    w::AbstractVector{BFloat16},
+    epsilon::Float32,
+)
+    @assert axes(x, 1) == axes(w, 1)
+    for j in axes(x, 3)
+        for i in axes(x, 2)
+            rmsnorm!(view(x, :, i, j), w, epsilon)
+        end
+    end
+    return x
+end
+
+
 ########################################################### ACTIVATION FUNCTIONS
 
 
@@ -474,16 +528,19 @@ export silu, softmax!
 
 function softmax!(x::AbstractVector{T}) where {T}
     if !isempty(x)
-        m = maximum(x)
-        s = zero(T)
         @inbounds begin
+            m = maximum(x)
+            acc = zero(T)
             @simd for i in eachindex(x)
                 y = exp(x[i] - m)
                 x[i] = y
-                s += y
+                acc += y
+            end
+            inv_sum = inv(acc)
+            @simd ivdep for i in eachindex(x)
+                x[i] *= inv_sum
             end
         end
-        x .*= inv(s)
     end
     return x
 end

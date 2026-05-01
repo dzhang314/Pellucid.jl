@@ -41,7 +41,7 @@ const Pretoken = Union{Int,String,SubString{String}}
 function push_split_added_tokens!(
     result::AbstractVector{Pretoken},
     s::Union{String,SubString{String}},
-    added_tokens::AbstractVector{AddedToken}
+    added_tokens::AbstractVector{AddedToken},
 )
     if isempty(s)
         return result
@@ -522,9 +522,7 @@ function causal_attention_prefill!(
     @assert issubset(ax_kv_tokens, axes(scores, 1))
     @assert length(cache_indices) == length(ax_q_tokens)
     @assert issubset(cache_indices, ax_kv_tokens)
-    num_q_heads = length(ax_q_heads)
-    num_kv_heads = length(ax_kv_heads)
-    @assert iszero(num_q_heads % num_kv_heads)
+    @assert iszero(length(ax_q_heads) % length(ax_kv_heads))
     @inbounds for (t_q, t_kv) in zip(ax_q_tokens, cache_indices)
         for (h_q, h_kv) in grouped_zip(ax_q_heads, ax_kv_heads)
             for s = first(ax_kv_tokens):t_kv
@@ -565,9 +563,7 @@ function causal_attention_decode!(
     @assert axes(k) == (ax_head, ax_kv_heads, ax_tokens)
     @assert axes(v) == (ax_head, ax_kv_heads, ax_tokens)
     @assert issubset(ax_tokens, axes(scores, 1))
-    num_q_heads = length(ax_q_heads)
-    num_kv_heads = length(ax_kv_heads)
-    @assert iszero(num_q_heads % num_kv_heads)
+    @assert iszero(length(ax_q_heads) % length(ax_kv_heads))
     @inbounds for (h_q, h_kv) in grouped_zip(ax_q_heads, ax_kv_heads)
         for s in ax_tokens
             acc = zero(Float32)

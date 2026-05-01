@@ -74,12 +74,15 @@ static void insert_top_k(
 void pellucid_lm_head_top_k_bf16(
     size_t *const restrict top_indices,
     float *const restrict top_values,
-    const size_t top_k, // must satisfy 0 < top_k <= vocabulary_size
+    const size_t top_k, // must be <= vocabulary_size
     const __bf16 *const restrict lm_head_weight,
     const __bf16 *const restrict hidden_state,
     const size_t vocabulary_size,
     const size_t hidden_size // must be divisible by 128
 ) {
+    if (top_k == 0) {
+        return;
+    }
     const size_t max_threads = (size_t)omp_get_max_threads();
     size_t all_indices[max_threads * top_k];
     float all_values[max_threads * top_k];
@@ -121,7 +124,7 @@ void pellucid_lm_head_top_k_bf16(
                 _mm512_add_ps(_mm512_add_ps(c0, c1), _mm512_add_ps(c2, c3))
             );
             insert_top_k(
-                local_indices, local_values, &local_count, top_k, i + 1, value
+                local_indices, local_values, &local_count, top_k, i, value
             );
         }
         all_counts[thread_id] = local_count;

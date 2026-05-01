@@ -399,12 +399,13 @@ end
 ######################################################### LINEAR ALGEBRA KERNELS
 
 
-export linear!
+export linear!, lm_head_top_k!
 
 
 const PELLUCID_LIBRARY = Ref{Ptr{Cvoid}}()
 const PELLUCID_MATVEC_BF16 = Ref{Ptr{Cvoid}}()
 const PELLUCID_MATMUL_BF16 = Ref{Ptr{Cvoid}}()
+const PELLUCID_LM_HEAD_TOP_K_BF16 = Ref{Ptr{Cvoid}}()
 
 
 function __init__()
@@ -412,6 +413,8 @@ function __init__()
         "deps", "usr", "lib", "libpellucid.$dlext"))
     PELLUCID_MATVEC_BF16[] = dlsym(PELLUCID_LIBRARY[], :pellucid_matvec_bf16)
     PELLUCID_MATMUL_BF16[] = dlsym(PELLUCID_LIBRARY[], :pellucid_matmul_bf16)
+    PELLUCID_LM_HEAD_TOP_K_BF16[] = dlsym(
+        PELLUCID_LIBRARY[], :pellucid_lm_head_top_k_bf16)
     return nothing
 end
 
@@ -460,6 +463,30 @@ function linear!(
         linear!(view(y, :, last(axes(y, 2))), w, view(x, :, last(axes(x, 2))))
     end
     return y
+end
+
+
+function lm_head_top_k!(
+    top_indices::StridedVector{Csize_t},
+    top_values::StridedVector{Float32},
+    lm_head_weight::StridedMatrix{BFloat16},
+    hidden_state::StridedVector{BFloat16},
+)
+    @assert strides(top_indices) == (1,)
+    @assert strides(top_values) == (1,)
+    @assert strides(lm_head_weight) == (1, size(lm_head_weight, 1))
+    @assert strides(hidden_state) == (1,)
+    @assert axes(top_indices, 1) == axes(top_values, 1)
+    @assert axes(lm_head_weight, 1) == axes(hidden_state, 1)
+    @assert length(top_indices) <= size(lm_head_weight, 2)
+    @assert iszero(size(lm_head_weight, 1) % 128)
+    ccall(PELLUCID_LM_HEAD_TOP_K_BF16[], Cvoid,
+        (Ptr{Csize_t}, Ptr{Float32}, Csize_t,
+            Ptr{BFloat16}, Ptr{BFloat16}, Csize_t, Csize_t),
+        top_indices, top_values, length(top_indices),
+        lm_head_weight, hidden_state,
+        size(lm_head_weight, 2), size(lm_head_weight, 1))
+    return (top_indices, top_values)
 end
 
 
@@ -708,48 +735,42 @@ end
 ####################################################################### SAMPLING
 
 
-export sample_logits
+export sample_logits!
 
 
-function sample_logits(
-    logits::AbstractVector{BFloat16},
+function sample_logits!(
+    logits::AbstractVector{Float32},
+    token_ids::AbstractVector{<:Integer},
     temperature::Real;
-    top_k::Union{Nothing,Integer}=nothing,
     top_p::Union{Nothing,Real}=nothing,
 )
+    @assert axes(logits, 1) == axes(token_ids, 1)
     @assert !isempty(logits)
-    @assert isnothing(top_k) || (top_k > 0)
     @assert isnothing(top_p) || (top_p > 0)
-    k = isnothing(top_k) ? length(logits) : min(Int(top_k), length(logits))
 
     @inbounds begin
-        probabilities = similar(logits, Float32)
-        probabilities .= Float32.(logits) ./ Float32(temperature)
-        softmax!(probabilities)
+        logits .*= inv(Float32(temperature))
+        softmax!(logits)
 
-        top_indices = partialsortperm(probabilities, 1:k, rev=true)
-        top_probabilities = probabilities[top_indices]
-        top_probabilities ./= sum(top_probabilities)
-
-        total_probability = zero(Float32)
-        n = k
-        for i = 1:k
-            total_probability += top_probabilities[i]
-            if (!isnothing(top_p)) && (total_probability >= top_p)
+        p_total = zero(Float32)
+        n = lastindex(logits)
+        for i in eachindex(logits)
+            p_total += logits[i]
+            if (!isnothing(top_p)) && (p_total >= top_p)
                 n = i
                 break
             end
         end
 
         acc = zero(Float32)
-        u = rand(Float32) * total_probability
-        for i = 1:n
-            acc += top_probabilities[i]
+        u = p_total * rand(Float32)
+        for i = firstindex(logits):n
+            acc += logits[i]
             if acc > u
-                return top_indices[i]
+                return token_ids[i]
             end
         end
-        return top_indices[n]
+        return token_ids[n]
     end
 end
 
